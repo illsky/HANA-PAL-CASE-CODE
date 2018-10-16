@@ -1,0 +1,293 @@
+CREATE PROCEDURE sinopec_ypxs.ZFYP_GET_KHCJFX(
+IN  JGD_ID NVARCHAR(36),
+IN  SQLWHERE string,
+IN  SQLDL string,
+IN  OPTI VARCHAR(1),
+OUT RESULT sinopec_ypxs.FYP_TJFX_KHCJFX,
+OUT RESULT_LS SINOPEC_YPXS.FYP_TJFX_KHCJFX_DLKDJ2,
+OUT DETAIL_TABNAM1 VARCHAR(15),
+OUT DETAIL_TABNAM2 VARCHAR(15),
+--OUT OUT_STR1 VARCHAR(5000),
+--OUT OUT_STR2 VARCHAR(5000),
+OUT ERROR varchar(150)--错误信息字符串
+) LANGUAGE SQLSCRIPT 
+AS BEGIN
+/*修改记录：
+--20140928 Revice by Tian Geng
+--20141023 phqzhao 增加OPTI参数；增加客单价最后一条“大于最大值”的处理；
+--20141028 phqzhao 增加输出参数RESUTL1_MX，用于输出每条记录的明细条目；
+--20141030 PGTIAN 调整PI值的计算逻辑
+--20141125 PHQZHAO 优化性能，去掉了客单价的数组循环+PARTITION语句的使用
+--20141201 PHQZHAO 大类客单价（OPTI = 2）增加颜色排名的输出；
+--20141201 PHQZHAO 增加错误提示ERROR语句的输出；
+--20141208 PHQZHAO 更改明细结果表的属性，从COLUMN改为ROW，优化插入性能
+--20141219 PHQZHAO 更改名称
+--20150414 PHQZHAO 调整RESULT的结果小数位
+--20150619 PHQZHAO 应业务组要求将KZYSJE应收金额改成KZSSJE实收金额；
+--20150716 PHQZHAO 调整JEZB的输出逻辑；
+--20150720 PHQZHAO 增加商品明细显示，将现有的凭证明细数据作为备选：
+	DETAIL_TABNAM2：当执行'金额客单价'的时候,增加了按商品明细显示的数据；
+--20150731 PHQZHAO '金额客单价'，大类名称输出时，取消了为NULL和空的数据输出：
+--20151021 PHQZHAO 优化程序，在创建临时表之前，先调用存储过程SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE清空同名临时表；
+--20151021 PHQZHAO 判断如果没有读到数据就报无基础数据的错误；
+--20151117 PKLIU 修改客单价的错误逻辑(客单价最大最小值基准从由价格选取改为从每单金额选取)，排除实收金额小于0的交易，总客单数添加distinct限制。
+功能描述：
+--从数据源“销售商品流水分析”Z1FX_XSSPLSFX和“客单价表”Z1ZB_JGD_FYP+Z1ZB_JGD_FYP_ITM；根据输入参数
+得；客单价ITEM_ID，销售金额，销售数量，分别占比，PI值；和按中类的流水数量表
+*/
+DECLARE SQL_STR CLOB;
+DECLARE sql_str_mx CLOB :='' ;
+DECLARE SQL_STR2 CLOB;
+DECLARE SQL_STR3 CLOB;
+DECLARE SQL_STR4 CLOB;
+DECLARE JGD_INDEX  INTEGER := 1;
+DECLARE DLMC_INDEX  INTEGER := 1;
+DECLARE ZD_INDEX  INTEGER := 1;
+DECLARE LS_INDEX INTEGER := 1;
+DECLARE JGDITM_ARRAY NVARCHAR(36) ARRAY  ;
+DECLARE JGDITEMMS_ARRAY  NVARCHAR(36) ARRAY ;
+DECLARE LOW_ARRAY DOUBLE ARRAY  ;
+DECLARE HIGH_ARRAY DOUBLE ARRAY  ;
+DECLARE ZDITM_ARRAY NVARCHAR(36) ARRAY  ;
+DECLARE ZDITEMMS_ARRAY  NVARCHAR(36) ARRAY ;
+DECLARE ZDLOW_ARRAY DOUBLE ARRAY  ;
+DECLARE ZDHIGH_ARRAY DOUBLE ARRAY  ;
+DECLARE DLMC_ARRAY  NVARCHAR(36) ARRAY ;
+DECLARE jg_min DOUBLE ;
+DECLARE jg_max DOUBLE;
+declare ls_jgmax double;
+DECLARE XSJE_sum DOUBLE ;
+DECLARE XSBS_sum DOUBLE;
+declare ls_jgbc double;
+declare jg_bc integer;
+DECLARE LS_TISTEMP TIMESTAMP;
+DECLARE XSSL_sum DOUBLE;
+DECLARE RAND_MX VARCHAR(15);
+DECLARE SP_MX VARCHAR(15);
+DECLARE TAB_FLAG INTEGER := 0;
+DECLARE MYCOND1 CONDITION FOR SQL_ERROR_CODE 10001;
+--sql异常情况捕捉
+DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+  ERROR := ::SQL_ERROR_MESSAGE || ::SQL_ERROR_CODE;
+END;
+--创建凭证明细表的随机数临时表名
+select '#T'||SUBSTRING(RAND(),8,10) into rand_mx from dummy;
+--创建商品明细表的随机数临时表名
+select '#T'||SUBSTRING(RAND(),8,10) into sp_mx from dummy;
+
+call SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE('#LS_RESULT_BAS');
+CREATE LOCAL TEMPORARY COLUMN TABLE #LS_RESULT_BAS
+( "KDJ" VARCHAR(100) CS_STRING,
+"LOW" DOUBLE CS_DOUBLE,
+	 "XSJE" DOUBLE CS_DOUBLE,
+	 "JEZB" VARCHAR(20) CS_STRING,
+	 "LS" INT CS_INT,
+	 "PI" DOUBLE CS_DOUBLE ) ;
+
+call SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE('#LS_RESULT_LS2'); 
+CREATE LOCAL TEMPORARY COLUMN TABLE #LS_RESULT_LS2 ( "KDJ" VARCHAR(30) CS_STRING,
+"LOW" DOUBLE CS_DOUBLE,
+	 "DLMC" VARCHAR(30) CS_STRING,
+	 "XSSL" DOUBLE CS_DOUBLE ) 	 ;
+--创建结果表
+call SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE('#T_JGD_ITM'); 
+CREATE LOCAL TEMPORARY Column table #T_JGD_ITM like sinopec_ypxs.FYP_TJFX_JGD;
+--创建客单价的临时存储表
+call SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE('#LS_SUM'); 
+CREATE  LOCAL TEMPORARY  COLUMN TABLE #LS_SUM(
+     "XSBS_SUM" DOUBLE,
+     "XSJE_SUM" DOUBLE);
+--sql_str :='INSERT INTO #LS_SUM select count (distinct GZTYXSLSH) ,SUM (KZSSJE)  from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" where '||:SQLWHERE|| :SQLDL;
+--排除实收金额小于0的情况
+sql_str :='INSERT INTO #LS_SUM select count (distinct GZTYXSLSH) ,SUM (KZSSJE)  from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" where '||:SQLWHERE|| :SQLDL||' and KZSSJE>=0';
+EXEC :sql_str;
+
+
+ --创建凭证明细表
+  SQL_STR3 := 'CREATE  LOCAL TEMPORARY TABLE '|| :RAND_MX ||' LIKE sinopec_ypxs.FYP_TJFX_KHCJ1_MX ';
+ EXEC SQL_STR3;
+ --创建商品明细表
+  SQL_STR3 := 'CREATE  LOCAL TEMPORARY TABLE '|| :SP_MX ||' LIKE sinopec_ypxs.FYP_TJFX_KHCJ1_SPMX ';
+ EXEC SQL_STR3; 
+ 
+ 
+--当执行'金额客单价'的时候
+IF :OPTI = '1' then
+
+--如果客单价ID有输入时
+IF :JGD_ID <> '' 
+THEN
+SQL_STR2 := 'insert into #T_JGD_ITM SELECT JGDITEM_ID,JGDITEMMS,LOW,HIGH FROM SAPSR3.Z1ZB_JGD_FYP_ITM'
+||' WHERE JGD_ID = '||:JGD_ID||'  ORDER BY LOW ASC ';
+exec sql_str2;
+select MAX(HIGH) INTO ls_jgmax from  #T_JGD_ITM;
+SELECT CURRENT_TIMESTAMP INTO LS_TISTEMP FROM DUMMY;
+INSERT INTO #T_JGD_ITM VALUES('ZZZZZ'||:LS_TISTEMP,'大于'||:ls_jgmax,:ls_jgmax,99999999999999999);
+--选择客单价最大值XXX，组成最后一个客单价“大于XXX”
+ELSE 
+--如果客单价ID无输入时
+call SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE('#LS_DX'); 
+CREATE  LOCAL TEMPORARY  COLUMN TABLE #LS_DX(
+     "JG_MIN" DOUBLE,
+     "JG_MAX" DOUBLE);
+--sql_str2 := 
+--'INSERT INTO #LS_DX select min(KZFSDJ) JG_MIN, max( KZFSDJ) JG_MAX  '||
+--'from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" where '||:SQLWHERE||
+--' AND KZFSDJ is not null' ; 
+--修改客单价错误逻辑
+sql_str2 := 
+'INSERT INTO #LS_DX select min(Y),max(Y) from
+(select SUM(KZSSJE) Y from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" 
+where '||:SQLWHERE|| :SQLDL ||' and KZSSJE>=0 group by GZTYXSLSH) a';
+exec sql_str2;
+--读取客单价的最大、最小值；
+select ROUND(min( JG_MIN ),2),ROUND(max( JG_MAX ),2) into jg_min,jg_max from #LS_DX;
+drop table  #LS_DX;
+--如果没有读取客单价最值，或者最大客单价为0，抛出无客单价数据的异常；
+if jg_max = 0 or jg_max is null
+then 
+signal mycond1 set message_text = '没有找到基础数据或客单价数据异常！';
+end if ;
+
+
+ls_jgbc := ( :jg_max - :jg_min)/10;
+--计算临时步长；
+jg_bc :=   ceil( :ls_jgbc ) ;
+--根据逻辑取得实际步长：取大于或等于该值的最大整数；
+INSERT into #T_JGD_ITM values('ZDY001',0 || '-' || :jg_min + 1*:jg_bc||'元',0,:jg_min + :jg_bc);
+INSERT into #T_JGD_ITM values('ZDY002',round((:jg_min + 1*:jg_bc),1) || '-' || :jg_min + 2*:jg_bc||'元',:jg_min + :jg_bc,:jg_min + 2*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY003',:jg_min + 2*:jg_bc || '-' || :jg_min + 3*:jg_bc||'元',:jg_min + 2*:jg_bc,:jg_min + 3*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY004',:jg_min + 3*:jg_bc || '-' || :jg_min + 4*:jg_bc||'元',:jg_min + 3*:jg_bc,:jg_min + 4*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY005',:jg_min + 4*:jg_bc || '-' || :jg_min + 5*:jg_bc||'元',:jg_min + 4*:jg_bc,:jg_min + 5*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY006',:jg_min + 5*:jg_bc || '-' || :jg_min + 6*:jg_bc||'元',:jg_min + 5*:jg_bc,:jg_min + 6*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY007',:jg_min + 6*:jg_bc || '-' || :jg_min + 7*:jg_bc||'元',:jg_min + 6*:jg_bc,:jg_min + 7*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY008',:jg_min + 7*:jg_bc || '-' || :jg_min + 8*:jg_bc||'元',:jg_min + 7*:jg_bc,:jg_min + 8*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY009',:jg_min + 8*:jg_bc || '-' || :jg_min + 9*:jg_bc||'元',:jg_min + 8*:jg_bc,:jg_min + 9*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY010','大于'||:jg_min + 9*:jg_bc ||'元',:jg_min + 9*:jg_bc,99999999999999999);
+END IF;
+
+select XSBS_SUM,XSJE_SUM into  XSBS_sum,XSJE_sum from #LS_SUM;
+--判断如果没有读到数据就报无基础数据的错误。
+if XSBS_sum = 0 then 
+signal mycond1 set message_text = '未找到数据。';
+end if;
+
+ sql_str := 
+' INSERT INTO  #LS_RESULT_BAS ' ||
+'select B.JGDITEMMS kdj, b.low LOW,
+(CASE  WHEN  SUM(A.Y) IS NULL THEN 0 ELSE  ROUND(SUM(A.Y),2)  END) XSJE ,
+--(CASE  WHEN  SUM(A.Y) IS NULL THEN 0 ELSE  100*ROUND(SUM(A.Y)/'||:XSJE_sum||',4) END) JEZB, 
+0 JEZB,sum(A.X),
+ (CASE  WHEN  SUM(A.X) IS NULL THEN 0 ELSE  ROUND(1000*SUM(A.X)/'||:XSBS_sum||',2)  END) PI 
+ from ' ||'(select distinct GZTYXSLSH ,count(DISTINCT GZTYXSLSH) X ,(case when SUM(KZSSJE) is null then 0 else round(SUM(KZSSJE),2) end) Y from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" ' ||
+' where '||  :SQLWHERE || :SQLDL ||' and KZSSJE>=0 GROUP BY GZTYXSLSH ) A join #T_JGD_ITM B ON A.Y >= B.LOW AND A.Y < B.HIGH group by B.JGDITEMMS,b.low order by B.low';
+--OUT_STR1 := :SQL_STR;
+EXEC :sql_str;
+--判断如果没有读到数据就报无基础数据的错误。
+select max(1) into TAB_FLAG from dummy where not exists 
+(select TOP 1 *  from #LS_RESULT_BAS );
+if TAB_FLAG = 1 then 
+signal mycond1 set message_text = '未找到数据。';
+end if;
+
+--生成凭证明细数据：RESUTL1_MX
+ sql_str_mx := 
+ 'INSERT INTO '|| :RAND_MX ||
+' select  B.JGDITEMMS '||
+'  KDJ ,A.GZTYXSLSH,A.Y KZSSJE, A.X KZSPXSSL from ' ||
+'(select distinct GZTYXSLSH ,SUM(KZSPXSSL) X ,(case when SUM(KZSSJE) is null then 0 else round(SUM(KZSSJE),2) end) Y from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" ' ||
+' where '||  :SQLWHERE || :SQLDL ||' and KZSSJE>=0 GROUP BY GZTYXSLSH ) A  join #T_JGD_ITM B ON A.Y >= B.LOW AND A.Y < B.HIGH  ORDER BY  KDJ ASC,KZSSJE DESC ';
+--'(select distinct GZTYXSLSH ,GZBBRQ,SUM(KZSPXSSL) X ,(case when SUM(KZSSJE) is null then 0 else round(SUM(KZSSJE),2) end) Y from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" ' ||
+--' where '||  :SQLWHERE || :SQLDL ||' GROUP BY GZTYXSLSH,GZBBRQ ) A  join #T_JGD_ITM B ON A.Y >= B.LOW AND A.Y < B.HIGH  ORDER BY  KDJ ASC,KZSSJE DESC ';
+--OUT_STR2 := :SQL_STR_MX;
+EXEC :sql_str_mx;
+--生成商品明细数据：SP_MX
+sql_str_mx := '';
+ sql_str_mx := 
+ 'INSERT INTO '|| :SP_MX ||
+' select  B.JGDITEMMS '||
+'  KDJ ,A.SPBM,A.SPMS,A.XSSL XSSL,A.XSJE XSJE ,A.FSDJ FSDJ from ' ||
+'(select distinct GZBZSPBM SPBM,g0txtlg SPMS,SUM(KZSPXSSL) XSSL, (case when SUM(KZSSJE) is null then 0 else round(SUM(KZSSJE),2) end) XSJE,'||
+'AVG(KZFSDJ) FSDJ from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" ' ||
+' where '||  :SQLWHERE || :SQLDL ||' and KZSSJE>=0 GROUP BY GZBZSPBM,G0TXTLG ) A  join #T_JGD_ITM B ON A.XSJE >= B.LOW AND A.XSJE < B.HIGH  ORDER BY  KDJ ASC,XSJE DESC ';
+EXEC :sql_str_mx;
+
+--当执行'品类客单价'的时候
+elseif :OPTI = '2' then
+
+--如果客单价ID有输入时
+IF :JGD_ID <> '' 
+THEN
+SQL_STR2 := 'insert into #T_JGD_ITM SELECT JGDITEM_ID,JGDITEMMS,LOW,HIGH FROM SAPSR3.Z1ZB_JGD_FYP_ITM'
+||' WHERE JGD_ID = '||:JGD_ID||'  ORDER BY LOW ASC ';
+exec sql_str2;
+select MAX(HIGH) INTO ls_jgmax from  #T_JGD_ITM;
+SELECT CURRENT_TIMESTAMP INTO LS_TISTEMP FROM DUMMY;
+INSERT INTO #T_JGD_ITM VALUES('ZZZZZ'||:LS_TISTEMP,'大于'||:ls_jgmax,:ls_jgmax,99999999999999999);
+--选择客单价最大值XXX，组成最后一个客单价“大于XXX”
+ELSE 
+--如果客单价ID无输入时
+call SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE('#LS_DX'); 
+CREATE  LOCAL TEMPORARY  COLUMN TABLE #LS_DX(
+     "JG_MIN" DOUBLE,
+     "JG_MAX" DOUBLE);
+--sql_str2 := 
+--'INSERT INTO #LS_DX select min(KZFSDJ) JG_MIN, max( KZFSDJ) JG_MAX  '||
+--'from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" where '||:SQLWHERE||
+--' AND KZFSDJ is not null' ; 
+--修改客单价错误逻辑
+sql_str2 := 
+'INSERT INTO #LS_DX select min(Y),max(Y) from
+(select SUM(KZSSJE) Y from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" 
+where '||:SQLWHERE|| :SQLDL ||' and KZSSJE>=0 group by GZTYXSLSH) a';
+exec sql_str2;
+--读取客单价的最大、最小值；
+select ROUND(min( JG_MIN ),2),ROUND(max( JG_MAX ),2) into jg_min,jg_max from #LS_DX;
+drop table  #LS_DX;
+--如果没有读取客单价最值，或者最大客单价为0，抛出无客单价数据的异常；
+if jg_max = 0 or jg_max is null
+then 
+signal mycond1 set message_text = '没有找到基础数据或客单价数据异常！';
+end if ;
+
+
+ls_jgbc := ( :jg_max - :jg_min)/10;
+--计算临时步长；
+jg_bc :=   ceil( :ls_jgbc ) ;
+--根据逻辑取得实际步长：取大于或等于该值的最大整数；
+INSERT into #T_JGD_ITM values('ZDY001',0 || '-' || :jg_min + 1*:jg_bc||'元',0,:jg_min + :jg_bc);
+INSERT into #T_JGD_ITM values('ZDY002',round((:jg_min + 1*:jg_bc),1) || '-' || :jg_min + 2*:jg_bc||'元',:jg_min + :jg_bc,:jg_min + 2*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY003',:jg_min + 2*:jg_bc || '-' || :jg_min + 3*:jg_bc||'元',:jg_min + 2*:jg_bc,:jg_min + 3*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY004',:jg_min + 3*:jg_bc || '-' || :jg_min + 4*:jg_bc||'元',:jg_min + 3*:jg_bc,:jg_min + 4*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY005',:jg_min + 4*:jg_bc || '-' || :jg_min + 5*:jg_bc||'元',:jg_min + 4*:jg_bc,:jg_min + 5*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY006',:jg_min + 5*:jg_bc || '-' || :jg_min + 6*:jg_bc||'元',:jg_min + 5*:jg_bc,:jg_min + 6*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY007',:jg_min + 6*:jg_bc || '-' || :jg_min + 7*:jg_bc||'元',:jg_min + 6*:jg_bc,:jg_min + 7*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY008',:jg_min + 7*:jg_bc || '-' || :jg_min + 8*:jg_bc||'元',:jg_min + 7*:jg_bc,:jg_min + 8*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY009',:jg_min + 8*:jg_bc || '-' || :jg_min + 9*:jg_bc||'元',:jg_min + 8*:jg_bc,:jg_min + 9*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY010','大于'||:jg_min + 9*:jg_bc ||'元',:jg_min + 9*:jg_bc,99999999999999999);
+END IF;
+
+--优化后
+ sql_str := 
+' INSERT INTO  #LS_RESULT_LS2  select B.JGDITEMMS KDJ ,B.LOW LOW,A.MC DLMC,SUM(A.X) XSSL from 
+ ( select LS,MC,X,sum(Y) over (partition by LS) AS M  from
+(select distinct GZTYXSLSH LS,GZBZPLDMC MC, count(GZXPHH) X,sum(KZSSJE) Y from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" 
+where '||  :SQLWHERE ||' and KZSSJE>=0 group by GZTYXSLSH,GZBZPLDMC )  ) A JOIN   #T_JGD_ITM B ON A.M >= B.LOW AND A.M < B.HIGH 
+ group by B.JGDITEMMS,B.LOW,A.MC ORDER BY B.LOW,A.MC' ;
+EXEC :sql_str;
+end if;
+--PHQZHAO 20150716 调整JEZB的输出逻辑；
+--RESULT = SELECT KDJ,round(XSJE,2) XSJE,round(JEZB,2) JEZB,LS,PI FROM #LS_RESULT_BAS;
+RESULT = SELECT KDJ,round(XSJE,2) XSJE,round(round(XSJE,2)/sum(xsje) over()*100,2) JEZB,LS,PI FROM #LS_RESULT_BAS;
+--20150731 PHQZHAO '金额客单价'，大类名称输出时，取消了为NULL的数据输出：
+--RESULT_LS = SELECT KDJ,DLMC,XSSL,row_number() over (partition by DLMC order by xssl desc) as ROW_NO  FROM  #LS_RESULT_LS2 order by low;
+RESULT_LS = SELECT KDJ,DLMC,XSSL,row_number() over (partition by DLMC order by xssl desc) as ROW_NO  FROM  #LS_RESULT_LS2
+where (DLMC is not null and dlmc <> '' ) order by low;
+DETAIL_TABNAM1 :=  :RAND_MX;
+DETAIL_TABNAM2 :=  :SP_MX;
+DROP TABLE #LS_RESULT_BAS;
+DROP TABLE #LS_RESULT_LS2;
+DROP TABLE #T_JGD_ITM;
+DROP TABLE #LS_SUM;
+END;
