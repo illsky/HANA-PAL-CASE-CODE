@@ -1,0 +1,49 @@
+create procedure sinopec_ypxs.zfyp_get_spfl_abcfx
+(in model int,in kf varchar(20),
+in sqlstr CLOB,in perc1 double,
+in perc2 double,in perc3 double,
+out result sinopec_ypxs.result_t,
+out message varchar(200))
+/**
+--author Geng Tian
+--2014.9.1 PAL ABC分析
+--20141204 PHQZHAO 输出的message参数赋值SQL异常的文字信息
+--20150413 PHQZHAO 判断执行PAL的基础数据是否有数，如果没有数据将提示NO RESULT，并且不执行该PAL存储过程；
+--20150807 PHQZHAO 将IN参数SQLSTR和变量l_sqlstr换成CLOB，避免输入语句过长导致错误；
+**/
+language sqlscript 
+as begin
+--	declare l_sqlstr STRING;
+	DECLARE L_SQLSTR CLOB;
+	declare md STRING;
+	DECLARE TAB_FLAG INTEGER := 0;
+--sql异常情况捕捉
+DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+  MESSAGE := ::SQL_ERROR_MESSAGE || ::SQL_ERROR_CODE;
+END;	
+	CREATE local temporary TABLE #LCONTROL_TBL ("Name" VARCHAR(100), "intArgs" INT, "doubleArgs" DOUBLE,"strArgs" VARCHAR(100));
+	INSERT INTO #LCONTROL_TBL VALUES ('THREAD_NUMBER',1,null,null); 
+	INSERT INTO #LCONTROL_TBL VALUES ('PERCENT_A',null,:perc1,null); 
+	INSERT INTO #LCONTROL_TBL VALUES ('PERCENT_B',null,:perc2,null); 
+	INSERT INTO #LCONTROL_TBL VALUES ('PERCENT_C',null,:perc3,null); 
+	lcontrol_tbl = select * from #lcontrol_tbl;
+	SELECT case when :model=0 then 'GZBZSPBM' else 'G0JYZMS' end INTO md FROM dummy;
+	--message := :kf; 
+	create local temporary table #lt_data ("ITEM" VARCHAR(16), "VALUE" DECIMAL(17,2));
+	l_sqlstr := 'insert into #lt_data(select distinct('||:md||') AS ITEM,(SUM('||:kf ||')) AS VALUE FROM _SYS_BIC."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPMXFX" where ' || :sqlstr || ' group by ';
+	l_sqlstr :=:l_sqlstr||:md||')';
+	exec :l_sqlstr;
+	l_abcdata = select * from #lt_data;
+
+	drop table #lt_data;
+	drop table #lcontrol_tbl;
+--20150413 PHQZHAO	判断执行PAL的基础数据是否有数，如果没有数据将提示NO RESULT，并且不执行该PAL存储过程；
+	select max(1) into TAB_FLAG from dummy where not exists (select * from :l_abcdata);
+	if TAB_FLAG = 1 then 
+	RESULT = SELECT '' ABC,'' ITEM FROM DUMMY;
+	MESSAGE := 'NO RESULT';
+	else
+	CALL _SYS_AFL.PAL_ABC(:l_abcdata,:LCONTROL_TBL,result) with overview;
+	end if;
+end;
