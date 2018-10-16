@@ -1,0 +1,221 @@
+CREATE PROCEDURE sinopec_ypxs.ZFYP_GET_JGDFX(
+IN  JGD_ID NVARCHAR(36),
+IN  SQLWHERE string,
+IN OPTI VARCHAR(1),
+OUT RESULT sinopec_ypxs.FYP_TJFX_JGDFX,
+OUT RESULT_BLD sinopec_ypxs.FYP_TJFX_BLDJGDFX,
+OUT DETAIL_TABNAM VARCHAR(15),
+OUT ERROR varchar(150)--错误信息字符串
+) LANGUAGE SQLSCRIPT 
+AS BEGIN
+/*修改记录：
+--20140916 PHQZHAO 创建；
+--20141017 PHQZHAO 修改价格带逻辑，自行生成最后一条：LS_JGDMAX 到 0,即 大于最大值；
+--20141201 PHQZHAO 增加OPTI=2,带便利店名称的输出；
+--20141201 PHQZHAO 增加价格带的输出商品明细临时表；
+--20141208 PHQZHAO 更改明细结果表的属性，从COLUMN改为ROW，优化插入性能;
+--20141219 PHQZHAO 更改名称;
+--20141223 PHQZHAO 便利店名称为空判断；
+--20150619 PHQZHAO 按业务组要求，将KZYSJE应收金额改成KZSSJE实收金额；
+--20151019 PHQZHAO 优化程序，在创建临时表之前，先调用存储过程SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE清空同名临时表；
+--20151019 PHQZHAO 如果没有读取价格最值，或者最大价格为0，抛出无价格数据的异常：没有找到基础数据或价格数据异常。
+功能描述：
+--从数据源“销售商品柳树分析”Z1FX_XSSPLSFX和“价格带表”Z1ZB_JGD_FYP+Z1ZB_JGD_FYP_ITM；根据输入参数
+得；价格带ITEM_ID，交易比数，销售数量*/
+DECLARE SQL_STR CLOB;
+DECLARE SQL_STR2 CLOB;
+DECLARE SQL_STR3 CLOB;
+DECLARE SQL_STR4 CLOB;
+DECLARE SQL_STR5 CLOB;
+DECLARE SQL_STR6 CLOB;
+DECLARE SQL_STR7 CLOB;
+DECLARE SQL_STR8 CLOB;
+DECLARE SQL_STR9 CLOB;
+DECLARE SQL_STR10 CLOB;
+DECLARE JGD_INDEX  INTEGER := 1;
+DECLARE ZD_INDEX  INTEGER := 1;
+DECLARE LS_INDEX INTEGER := 1;
+DECLARE JGDITM_ARRAY NVARCHAR(36) ARRAY  ;
+DECLARE JGDITEMMS_ARRAY  NVARCHAR(36) ARRAY ;
+DECLARE LOW_ARRAY DOUBLE ARRAY  ;
+DECLARE HIGH_ARRAY DOUBLE ARRAY  ;
+DECLARE ZDITM_ARRAY NVARCHAR(36) ARRAY  ;
+DECLARE ZDITEMMS_ARRAY  NVARCHAR(36) ARRAY ;
+DECLARE ZDLOW_ARRAY DOUBLE ARRAY  ;
+DECLARE ZDHIGH_ARRAY DOUBLE ARRAY  ;
+DECLARE jg_min DOUBLE ;
+DECLARE jg_max DOUBLE;
+declare ls_jgbc double;
+declare ls_jgmax double;
+declare ls_count integer := 0;
+declare jg_bc integer;
+DECLARE LS_TISTEMP TIMESTAMP;
+DECLARE RAND_LS VARCHAR(15);
+DECLARE RAND_MX VARCHAR(15);
+DECLARE RAND_BLDMX VARCHAR(15);
+DECLARE MYCOND1 CONDITION FOR SQL_ERROR_CODE 10001;
+--sql异常情况捕捉
+DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+  ERROR := ::SQL_ERROR_MESSAGE || ::SQL_ERROR_CODE;
+  ROLLBACK;
+END;
+--不带便利店的输出结果
+call SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE('#LS_RESULT');
+CREATE LOCAL TEMPORARY COLUMN TABLE #LS_RESULT LIKE  sinopec_ypxs.FYP_TJFX_JGDFX;
+--带便利店的输出结果
+call SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE('#LS_RESULT_BLD');
+CREATE  LOCAL TEMPORARY  TABLE #LS_RESULT_BLD LIKE SINOPEC_YPXS.FYP_TJFX_BLDJGDFX ;
+--创建价格带的临时存储表
+call SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE('#T_JGD_ITM');
+CREATE LOCAL TEMPORARY Column table #T_JGD_ITM like sinopec_ypxs.FYP_TJFX_JGD;
+--创建结果明细表的随机数临时表名
+select '#T'||SUBSTRING(RAND(),8,10) into rand_mx from dummy;
+--创建便利店结果明细表的随机数临时表名
+select '#T'||SUBSTRING(RAND(),8,10) into rand_bldmx from dummy;
+IF :JGD_ID <> '' 
+THEN
+--如果价格带ID有输入时
+SQL_STR2 := 'insert into #T_JGD_ITM SELECT JGDITEM_ID,JGDITEMMS,LOW,HIGH FROM SAPSR3.Z1ZB_JGD_FYP_ITM'
+||' WHERE JGD_ID = '||:JGD_ID||'   ORDER BY LOW ASC ';
+exec sql_str2;
+select MAX(HIGH) INTO ls_jgmax from  #T_JGD_ITM;
+SELECT CURRENT_TIMESTAMP INTO LS_TISTEMP FROM DUMMY;
+INSERT INTO #T_JGD_ITM VALUES('ZZZZZ'||:LS_TISTEMP,'大于'||:ls_jgmax,:ls_jgmax,99999999999999999);
+ELSE 
+--如果价格带ID无输入时
+call SINOPEC_YPXS.ZGG_SET_DELTEMPTABLE('#LS_DX');
+CREATE  LOCAL TEMPORARY  COLUMN TABLE #LS_DX("JG_MIN" DOUBLE,"JG_MAX" DOUBLE);
+SQL_STR2 := 
+'INSERT INTO #LS_DX select min( KZFSDJ) JG_MIN, max( KZFSDJ) JG_MAX  '||
+'from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" where '||:SQLWHERE||
+' KZFSDJ is not null' ; 
+exec sql_str2;
+select ROUND(min( JG_MIN ),2),ROUND(max( JG_MAX ),2) into jg_min,jg_max from #LS_DX;
+drop table  #LS_DX;
+--如果没有读取价格最值，或者最大价格为0，抛出无价格数据的异常；
+if jg_max = 0 or jg_max is null
+then 
+signal mycond1 set message_text = '没有找到基础数据或价格数据异常！';
+end if ;
+
+--读取价格的最大、最小值；
+ls_jgbc := ( :jg_max - :jg_min)/10;
+--计算临时步长；
+jg_bc :=   ceil( :ls_jgbc ) ;
+--根据逻辑取得实际步长：取大于或等于该值的最大整数；
+--填充自动生成的价格带表
+INSERT into #T_JGD_ITM values('ZD1001',0 || '-' || :jg_min + 1*:jg_bc||'元',0,:jg_min + :jg_bc);
+INSERT into #T_JGD_ITM values('ZDY002',round((:jg_min + 1*:jg_bc),1) || '-' || :jg_min + 2*:jg_bc||'元',:jg_min + :jg_bc,:jg_min + 2*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY003',:jg_min + 2*:jg_bc || '-' || :jg_min + 3*:jg_bc||'元',:jg_min + 2*:jg_bc,:jg_min + 3*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY004',:jg_min + 3*:jg_bc || '-' || :jg_min + 4*:jg_bc||'元',:jg_min + 3*:jg_bc,:jg_min + 4*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY005',:jg_min + 4*:jg_bc || '-' || :jg_min + 5*:jg_bc||'元',:jg_min + 4*:jg_bc,:jg_min + 5*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY006',:jg_min + 5*:jg_bc || '-' || :jg_min + 6*:jg_bc||'元',:jg_min + 5*:jg_bc,:jg_min + 6*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY007',:jg_min + 6*:jg_bc || '-' || :jg_min + 7*:jg_bc||'元',:jg_min + 6*:jg_bc,:jg_min + 7*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY008',:jg_min + 7*:jg_bc || '-' || :jg_min + 8*:jg_bc||'元',:jg_min + 7*:jg_bc,:jg_min + 8*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY009',:jg_min + 8*:jg_bc || '-' || :jg_min + 9*:jg_bc||'元',:jg_min + 8*:jg_bc,:jg_min + 9*:jg_bc);
+INSERT into #T_JGD_ITM values('ZDY010','大于'||:jg_min + 9*:jg_bc ||'元',:jg_min + 9*:jg_bc,99999999999999999);
+END IF;
+--根据是否带便利店的输出创建明细结果表
+IF :OPTI = '2'
+--带便利店输出
+THEN
+--创建便利店结果明细表
+-- SQL_STR5 := 'CREATE  LOCAL TEMPORARY  COLUMN TABLE '|| :RAND_BLDMX ||' LIKE SINOPEC_YPXS.FYP_TJFX_BLDJGDFXMX ';
+--更改COLUMN表为ROW表，优化插入性能
+  SQL_STR5 := 'CREATE  LOCAL TEMPORARY  TABLE '|| :RAND_BLDMX ||' LIKE SINOPEC_YPXS.FYP_TJFX_BLDJGDFXMX ';
+ EXEC SQL_STR5;
+ELSE
+ --创建结果明细表
+--SQL_STR6 := 'CREATE  LOCAL TEMPORARY  COLUMN TABLE '|| :RAND_MX ||' LIKE SINOPEC_YPXS.FYP_TJFX_JGDFXMX ';
+--更改COLUMN表为ROW表，优化插入性能 
+ SQL_STR6 := 'CREATE  LOCAL TEMPORARY  TABLE '|| :RAND_MX ||' LIKE SINOPEC_YPXS.FYP_TJFX_JGDFXMX ';
+ EXEC SQL_STR6;
+END IF;
+T_JGD_ITM = select JGDITEM_ID,JGDITEMMS,LOW,HIGH from  #T_JGD_ITM order by JGDITEM_ID;
+   ZDITM_ARRAY := ARRAY_AGG(:T_JGD_ITM.JGDITEM_ID);  
+   ZDITEMMS_ARRAY := ARRAY_AGG(:T_JGD_ITM.JGDITEMMS); 
+   ZDLOW_ARRAY  := ARRAY_AGG(:T_JGD_ITM.LOW); 
+   ZDHIGH_ARRAY  := ARRAY_AGG(:T_JGD_ITM.HIGH); 
+--将取得的自动价格带信息整理成数组；   
+FOR ZD_INDEX IN 1 .. CARDINALITY(:ZDITM_ARRAY) DO
+IF :OPTI = '2'
+--带便利店输出
+THEN
+--插入表头值
+sql_str7 := ' INSERT INTO  #LS_RESULT_BLD ' ||
+'select '''||:ZDITM_ARRAY[:ZD_INDEX]||''' JGDITEM_ID , '''||:ZDITEMMS_ARRAY[:ZD_INDEX]||
+' '' JGDITEMMS ,A.G0JYZMS,A.GZFYXMMC,0 JYBS ,0 XSSL ,0 XSJE from ' ||
+--'(select distinct G0JYZMS,GZFYXMMC from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" ' ||
+'(select distinct G0JYZMS,(case WHEN GZFYXMMC IS  NULL  THEN ''空'' else GZFYXMMC end ) as GZFYXMMC  from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" ' ||
+' where '||  :SQLWHERE || ' G0JYZMS <> ''''   GROUP BY G0JYZMS,GZFYXMMC ) A  GROUP BY A.G0JYZMS,A.GZFYXMMC ' ;
+EXEC SQL_STR7;
+--生成随机表名
+select '#T'||SUBSTRING(RAND(),8,10) into rand_LS from dummy;
+--创建随机表
+SQL_STR8 :=
+'CREATE  LOCAL TEMPORARY TABLE '|| :RAND_LS ||' LIKE SINOPEC_YPXS.FYP_TJFX_BLDJGDFX' ;
+EXEC SQL_STR8;
+--插入数据到随机表
+SQL_STR9 := 
+' INSERT INTO  '||:RAND_LS ||
+' select '''||:ZDITM_ARRAY[:ZD_INDEX]||''' JGDITEM_ID , '''||:ZDITEMMS_ARRAY[:ZD_INDEX]||
+' '' JGDITEMMS ,A.G0JYZMS,A.GZFYXMMC,count(*) JYBS ,SUM(A.X) XSSL ,SUM(A.Y) XSJE from ' ||
+--'(select distinct GZTYXSLSH ,G0JYZMS,GZFYXMMC,SUM (KZSPXSSL) X ,SUM (KZSSJE) Y from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" ' ||
+'(select distinct GZTYXSLSH ,G0JYZMS,(case WHEN GZFYXMMC IS  NULL  THEN ''空'' else GZFYXMMC end ) as GZFYXMMC ,SUM (KZSPXSSL) X ,SUM (KZSSJE) Y from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" ' ||
+' where '||  :SQLWHERE || '  KZFSDJ > ' || :ZDLOW_ARRAY[:ZD_INDEX] ||
+' AND KZFSDJ <= '|| :ZDHIGH_ARRAY[:ZD_INDEX] || '   GROUP BY GZTYXSLSH,G0JYZMS,GZFYXMMC ) A  GROUP BY A.G0JYZMS,A.GZFYXMMC ' ;
+EXEC SQL_STR9;
+--从随机表更新结果表
+SQL_STR := 'UPDATE #LS_RESULT_BLD SET JYBS = '||:RAND_LS||'.JYBS,XSSL = '||:RAND_LS||'.XSSL,XSJE  = '||:RAND_LS||
+'.XSJE FROM  #LS_RESULT_BLD, '||:RAND_LS||' WHERE #LS_RESULT_BLD.JGDITEM_ID = '||:RAND_LS||
+'.JGDITEM_ID AND #LS_RESULT_BLD.JGDITEMMS =  '||:RAND_LS||'.JGDITEMMS AND #LS_RESULT_BLD.G0JYZMS = '||:RAND_LS||'.G0JYZMS';
+
+--带便利店的明细输出
+ sql_str3 := 
+ ' INSERT INTO '||:RAND_BLDMX ||' select '''||:ZDITM_ARRAY[:ZD_INDEX]||''' JGDITEM_ID , '''||:ZDITEMMS_ARRAY[:ZD_INDEX]||
+--' '' JGDITEMMS, '||'G0JYZMS,GZFYXMMC,GZBZSPBM ,G0TXTLG,SUM(KZSPXSSL) XSSL,SUM(KZSSJE) XSJE  ,ROUND(AVG(KZFSDJ),2) KZFSDJ 
+' '' JGDITEMMS, '||'G0JYZMS,(case WHEN GZFYXMMC IS  NULL  THEN ''空'' else GZFYXMMC end ) as GZFYXMMC, GZBZSPBM ,G0TXTLG,SUM(KZSPXSSL) XSSL,SUM(KZSSJE) XSJE  ,ROUND(AVG(KZFSDJ),2) KZFSDJ
+ from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" '||
+ ' where '||  :SQLWHERE || '  KZFSDJ > ' || :ZDLOW_ARRAY[:ZD_INDEX] ||
+' AND KZFSDJ <= '|| :ZDHIGH_ARRAY[:ZD_INDEX] ||' GROUP BY  G0JYZMS,GZFYXMMC,GZBZSPBM ,G0TXTLG ORDER BY AVG(KZFSDJ) DESC ';
+ELSE
+--不带便利店输出
+ sql_str := 
+' INSERT INTO  #LS_RESULT ' ||
+'select '''||:ZDITM_ARRAY[:ZD_INDEX]||''' JGDITEM_ID , '''||:ZDITEMMS_ARRAY[:ZD_INDEX]||
+' '' JGDITEMMS ,count(*) JYBS ,SUM(A.X) XSSL,SUM(A.Y) XSJE  from ' ||
+'(select distinct GZTYXSLSH ,SUM (KZSPXSSL) X ,SUM (KZSSJE) Y from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" ' ||
+' where '||  :SQLWHERE || '  KZFSDJ > ' || :ZDLOW_ARRAY[:ZD_INDEX] ||
+' AND KZFSDJ <= '|| :ZDHIGH_ARRAY[:ZD_INDEX] || ' GROUP BY GZTYXSLSH ) A ' ;
+--不带便利店的明细输出
+ sql_str3 := 
+ ' INSERT INTO '||:RAND_MX ||' select '''||:ZDITM_ARRAY[:ZD_INDEX]||''' JGDITEM_ID , '''||:ZDITEMMS_ARRAY[:ZD_INDEX]||
+' '' JGDITEMMS, '||'GZBZSPBM ,G0TXTLG,SUM(KZSPXSSL) XSSL,SUM(KZSSJE) XSJE ,ROUND(AVG(KZFSDJ),2) KZFSDJ 
+ from "_SYS_BIC"."sinopec.zbyy.xsyy.z1-fyp/Z1FX_XSSPLSFX" '||
+ ' where '||  :SQLWHERE || '  KZFSDJ > ' || :ZDLOW_ARRAY[:ZD_INDEX] ||
+' AND KZFSDJ <= '|| :ZDHIGH_ARRAY[:ZD_INDEX] ||' GROUP BY  GZBZSPBM ,G0TXTLG ORDER BY AVG(KZFSDJ) DESC ';
+END IF;
+EXEC sql_str;
+EXEC sql_str3;
+
+IF :RAND_LS IS NOT NULL
+THEN
+SQL_STR10 := 'DROP TABLE '||:RAND_LS ;
+EXEC SQL_STR10;
+END IF;
+
+END FOR;
+RESULT = SELECT * FROM #LS_RESULT order by JGDITEM_ID ;
+RESULT_BLD = SELECT * FROM #LS_RESULT_BLD order by JGDITEM_ID ;
+IF :OPTI = '2'
+--带便利店输出
+THEN
+DETAIL_TABNAM :=  :RAND_BLDMX;
+ELSE
+DETAIL_TABNAM :=  :RAND_MX;
+END IF;
+DROP TABLE #LS_RESULT;
+DROP TABLE #LS_RESULT_BLD;
+DROP TABLE #T_JGD_ITM ;
+END;
